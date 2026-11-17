@@ -1,28 +1,3 @@
-AP-305 AP2 / OpenWrt 24.10.7 / Watchdog1
-
-OBJETIVO
-Compilar en GitHub Actions una variante experimental del mismo soporte AP-305
-cambiando el dispositivo que abre procd de /dev/watchdog a /dev/watchdog1.
-NO modifica GPIO, ART, bootloader ni AP1.
-
-USO
-1. Crea un repositorio nuevo en GitHub (por ejemplo ap305-ap2-build).
-2. En el navegador de GitHub, crea el archivo .github/workflows/build-ap2.yml.
-3. Copia allí todo el contenido del archivo build-ap2.yml incluido.
-4. Confirma los cambios y abre Actions > Build Aruba AP-305 AP2 watchdog1.
-5. Selecciona Run workflow.
-6. Si la compilación funciona, descarga el artefacto
-   aruba-ap305-ap2-watchdog1-test.
-7. ANTES DE ESCRIBIR EN NAND, prueba únicamente el archivo
-   *-initramfs-uImage.itb desde RAM y confirma arranque estable.
-
-NOTAS
-- No ejecutar sysupgrade con el archivo de prueba sin validación.
-- No guardar bootargs init=/bin/sh para uso permanente.
-- No se ha ejecutado ni validado esta compilación; podría fallar al aplicar
-  los parches del proyecto comunitario o por dependencias de compilación.
-- El cambio de watchdog está basado en la prueba de AP2 que consiguió
-  transferir un descriptor abierto de watchdog1 mediante WDTFD=3.
 name: Build Aruba AP-305 AP2 watchdog1
 
 on:
