@@ -1,0 +1,95 @@
+AP-305 AP2 / OpenWrt 24.10.7 / Watchdog1
+
+OBJETIVO
+Compilar en GitHub Actions una variante experimental del mismo soporte AP-305
+cambiando el dispositivo que abre procd de /dev/watchdog a /dev/watchdog1.
+NO modifica GPIO, ART, bootloader ni AP1.
+
+USO
+1. Crea un repositorio nuevo en GitHub (por ejemplo ap305-ap2-build).
+2. En el navegador de GitHub, crea el archivo .github/workflows/build-ap2.yml.
+3. Copia allí todo el contenido del archivo build-ap2.yml incluido.
+4. Confirma los cambios y abre Actions > Build Aruba AP-305 AP2 watchdog1.
+5. Selecciona Run workflow.
+6. Si la compilación funciona, descarga el artefacto
+   aruba-ap305-ap2-watchdog1-test.
+7. ANTES DE ESCRIBIR EN NAND, prueba únicamente el archivo
+   *-initramfs-uImage.itb desde RAM y confirma arranque estable.
+
+NOTAS
+- No ejecutar sysupgrade con el archivo de prueba sin validación.
+- No guardar bootargs init=/bin/sh para uso permanente.
+- No se ha ejecutado ni validado esta compilación; podría fallar al aplicar
+  los parches del proyecto comunitario o por dependencias de compilación.
+- El cambio de watchdog está basado en la prueba de AP2 que consiguió
+  transferir un descriptor abierto de watchdog1 mediante WDTFD=3.
+name: Build Aruba AP-305 AP2 watchdog1
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 350
+    steps:
+      - name: Install OpenWrt build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential clang flex bison g++ gawk gcc-multilib g++-multilib gettext git libncurses-dev libssl-dev python3-setuptools rsync swig unzip zlib1g-dev file wget python3-pyelftools zstd patch
+
+      - name: Obtain OpenWrt 24.10.7 and AP-305 support
+        run: |
+          git clone --depth 1 --branch v24.10.7 https://github.com/openwrt/openwrt.git openwrt
+          git clone --depth 1 https://github.com/Fr4ctbyte/OpenWRT-Aruba305.git ap305
+          cd openwrt
+          git apply ../ap305/patches/upstream/0001-aruba-ap-305-support.patch
+
+      - name: Install watchdog1-only procd patch
+        run: |
+          mkdir -p openwrt/package/system/procd/patches
+          cat > openwrt/package/system/procd/patches/999-ap305-watchdog1.patch <<'PATCH'
+          --- a/watchdog.c
+          +++ b/watchdog.c
+          @@ -26,7 +26,7 @@
+           #include "procd.h"
+           #include "watchdog.h"
+          -#define WDT_PATH	"/dev/watchdog"
+          +#define WDT_PATH	"/dev/watchdog1"
+
+           static struct uloop_timeout wdt_timeout;
+           static int wdt_fd = -1;
+          PATCH
+
+      - name: Configure OpenWrt device
+        working-directory: openwrt
+        run: |
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+          cat > .config <<'CONFIG'
+          CONFIG_TARGET_ipq40xx=y
+          CONFIG_TARGET_ipq40xx_generic=y
+          CONFIG_TARGET_ipq40xx_generic_DEVICE_aruba_ap-305=y
+          CONFIG_PACKAGE_luci=y
+          CONFIG
+          make defconfig
+          grep -q '^CONFIG_TARGET_ipq40xx_generic_DEVICE_aruba_ap-305=y$' .config
+
+      - name: Compile target
+        working-directory: openwrt
+        run: |
+          make -j2 V=s
+          find bin/targets/ipq40xx/generic -maxdepth 1 -type f -name '*aruba_ap-305*' -print
+          test -n "$(find bin/targets/ipq40xx/generic -maxdepth 1 -type f -name '*aruba_ap-305-initramfs-uImage.itb' -print -quit)"
+
+      - name: Upload test firmware
+        uses: actions/upload-artifact@v4
+        with:
+          name: aruba-ap305-ap2-watchdog1-test
+          path: |
+            openwrt/bin/targets/ipq40xx/generic/*aruba_ap-305-initramfs-uImage.itb
+            openwrt/bin/targets/ipq40xx/generic/*aruba_ap-305-squashfs-sysupgrade.bin
+            openwrt/bin/targets/ipq40xx/generic/sha256sums
