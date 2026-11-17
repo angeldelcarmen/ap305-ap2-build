@@ -16,12 +16,52 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y build-essential clang flex bison g++ gawk gcc-multilib g++-multilib gettext git libncurses-dev libssl-dev python3-setuptools rsync swig unzip zlib1g-dev file wget python3-pyelftools zstd patch
 
+      
       - name: Obtain OpenWrt 24.10.7 and AP-305 support
         run: |
           git clone --depth 1 --branch v24.10.7 https://github.com/openwrt/openwrt.git openwrt
           git clone --depth 1 https://github.com/Fr4ctbyte/OpenWRT-Aruba305.git ap305
           cd openwrt
-          git apply ../ap305/patches/upstream/0001-aruba-ap-305-support.patch
+          python3 - <<'PY'
+          from pathlib import Path
+          import shutil
+
+          source = Path("../ap305/patches/upstream/qcom-ipq4029-ap-305.dts")
+          target = Path("target/linux/ipq40xx/files-6.6/arch/arm/boot/dts/qcom/qcom-ipq4029-ap-305.dts")
+          assert source.is_file(), "No se encontró el DTS del AP-305"
+          target.parent.mkdir(parents=True, exist_ok=True)
+          shutil.copy2(source, target)
+
+          for filename in [
+              "target/linux/ipq40xx/base-files/etc/board.d/02_network",
+              "target/linux/ipq40xx/base-files/lib/upgrade/platform.sh",
+          ]:
+              path = Path(filename)
+              data = path.read_text()
+              if "aruba,ap-305|" not in data:
+                  anchor = "aruba,ap-365|"
+                  assert anchor in data, f"No existe el ancla en {filename}"
+                  data = data.replace(anchor, "aruba,ap-305|\\\n\t" + anchor, 1)
+                  path.write_text(data)
+
+          path = Path("target/linux/ipq40xx/image/generic.mk")
+          data = path.read_text()
+          assert "define Device/aruba_glenmorangie" in data, "Falta plantilla Aruba"
+          if "define Device/aruba_ap-305" not in data:
+              data += """
+          define Device/aruba_ap-305
+          \t$(call Device/aruba_glenmorangie)
+          \tDEVICE_MODEL := AP-305
+          \tDEVICE_PACKAGES := kmod-hwmon-ad7418 ath10k-firmware-qca99x0-ct
+          \tDEVICE_DTS_CONFIG := Glenmorangie@1
+          endef
+          TARGET_DEVICES += aruba_ap-305
+          """
+              path.write_text(data)
+
+          print("Soporte AP-305 instalado correctamente")
+          PY
+
 
       - name: Install watchdog1-only procd patch
         run: |
