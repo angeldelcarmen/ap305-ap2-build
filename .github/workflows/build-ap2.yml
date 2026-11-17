@@ -66,23 +66,34 @@ jobs:
 
       - name: Install and validate watchdog1-only procd patch
         run: |
+          set -e
           mkdir -p openwrt/package/system/procd/patches
-          cat > openwrt/package/system/procd/patches/999-ap305-watchdog1.patch <<'PATCH'
-          --- a/watchdog.c
-          +++ b/watchdog.c
-          @@ -24,6 +24,6 @@
-           #include "procd.h"
-           #include "watchdog.h"
-          -#define WDT_PATH	"/dev/watchdog"
-          +#define WDT_PATH	"/dev/watchdog1"
+          curl --fail --location --silent --show-error \
+            https://raw.githubusercontent.com/openwrt/procd/c59f2d801f6a1b3740a8f08b2fcfe3cfb274699a/watchdog.c \
+            -o /tmp/watchdog.c
+          python3 - <<'PY'
+          from pathlib import Path
+          from difflib import unified_diff
 
-           static struct uloop_timeout wdt_timeout;
-           static int wdt_fd = -1;
-          PATCH
+          source = Path('/tmp/watchdog.c').read_text()
+          original = '#define WDT_PATH\t"/dev/watchdog"'
+          modified = '#define WDT_PATH\t"/dev/watchdog1"'
+          assert source.count(original) == 1, 'El codigo de procd cambio; se detiene por seguridad'
+          updated = source.replace(original, modified, 1)
+          patch = ''.join(unified_diff(
+              source.splitlines(keepends=True),
+              updated.splitlines(keepends=True),
+              fromfile='a/watchdog.c', tofile='b/watchdog.c', n=3,
+          ))
+          assert patch.count('-#define WDT_PATH') == 1
+          assert patch.count('+#define WDT_PATH') == 1
+          Path('openwrt/package/system/procd/patches/999-ap305-watchdog1.patch').write_text(patch)
+          print('Parche creado directamente desde el codigo fuente de procd')
+          PY
           mkdir -p /tmp/procd-patch-test
-          curl --fail --location --silent --show-error https://raw.githubusercontent.com/openwrt/procd/c59f2d801f6a1b3740a8f08b2fcfe3cfb274699a/watchdog.c -o /tmp/procd-patch-test/watchdog.c
+          cp /tmp/watchdog.c /tmp/procd-patch-test/watchdog.c
           (cd /tmp/procd-patch-test && patch --batch --dry-run -p1 < "$GITHUB_WORKSPACE/openwrt/package/system/procd/patches/999-ap305-watchdog1.patch")
-          echo "Parche procd verificado antes de compilar"
+          echo "Validacion del parche completada"
 
       - name: Configure OpenWrt device
         working-directory: openwrt
