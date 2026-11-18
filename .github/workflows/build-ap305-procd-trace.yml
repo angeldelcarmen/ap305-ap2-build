@@ -1,0 +1,131 @@
+name: Build Aruba AP-305 NAND procd trace
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 350
+    steps:
+      - name: Install OpenWrt build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential clang flex bison g++ gawk gcc-multilib g++-multilib gettext git libncurses-dev libssl-dev python3-setuptools rsync swig unzip zlib1g-dev file wget python3-pyelftools zstd patch
+
+      - name: Fetch pinned OpenWrt and AP-305 support
+        run: |
+          git clone --depth 1 --branch v24.10.7 https://github.com/openwrt/openwrt.git openwrt
+          git clone --depth 1 https://github.com/Fr4ctbyte/OpenWRT-Aruba305.git ap305
+          cd openwrt
+          cp ../ap305/patches/upstream/qcom-ipq4029-ap-305.dts target/linux/ipq40xx/files-6.6/arch/arm/boot/dts/qcom/
+          python3 - <<'PY'
+          from pathlib import Path
+          network = Path('target/linux/ipq40xx/base-files/etc/board.d/02_network')
+          value = network.read_text()
+          anchor = 'aruba,ap-303|\\\n'
+          assert value.count(anchor) == 1
+          network.write_text(value.replace(anchor, anchor + '\taruba,ap-305|\\\n'))
+
+          upgrade = Path('target/linux/ipq40xx/base-files/lib/upgrade/platform.sh')
+          value = upgrade.read_text()
+          anchor = 'aruba,ap-303h |\\\n'
+          assert value.count(anchor) == 1
+          upgrade.write_text(value.replace(anchor, anchor + '\taruba,ap-305 |\\\n'))
+
+          generic = Path('target/linux/ipq40xx/image/generic.mk')
+          value = generic.read_text()
+          assert 'define Device/aruba_glenmorangie' in value
+          assert 'define Device/aruba_ap-305' not in value
+          generic.write_text(value + '''
+          define Device/aruba_ap-305
+          \t$(call Device/aruba_glenmorangie)
+          \tDEVICE_MODEL := AP-305
+          \tDEVICE_PACKAGES := kmod-hwmon-ad7418 ath10k-firmware-qca99x0-ct
+          \tDEVICE_DTS_CONFIG := Glenmorangie@1
+          endef
+          TARGET_DEVICES += aruba_ap-305
+          ''')
+
+          dts = Path('target/linux/ipq40xx/files-6.6/arch/arm/boot/dts/qcom/qcom-ipq4029-ap-305.dts').read_text()
+          for setting in ('compatible = "linux,wdt-gpio";', 'gpios = <&tlmm 3 GPIO_ACTIVE_LOW>;', 'hw_algo = "toggle";', 'always-running;'):
+              assert setting in dts
+          PY
+          git rev-parse HEAD > ../openwrt-commit.txt
+          git -C ../ap305 rev-parse HEAD > ../ap305-commit.txt
+
+      - name: Instrument preinit without changing watchdog operation
+        working-directory: openwrt
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          file = Path('package/base-files/files/etc/preinit')
+          source = file.read_text()
+          anchor = 'boot_run_hook preinit_main\n'
+          assert source.count(anchor) == 1, 'preinit source changed; refusing blind edit'
+          instrumentation = '''
+          # AP305 diagnostic only: read-only serial snapshots across preinit/procd.
+          # Does not feed, stop, or reconfigure either watchdog.
+          (
+              i=0
+              while [ "$i" -lt 50 ]; do
+                  i=$((i + 1))
+                  {
+                      printf 'AP305-TRACE sample=%s uptime=' "$i"
+                      cat /proc/uptime
+                      printf 'AP305-TRACE pid1='; cat /proc/1/comm
+                      printf 'AP305-TRACE watchdog=' 
+                      for wd in /sys/class/watchdog/watchdog*; do
+                          [ -d "$wd" ] || continue
+                          printf '%s ' "${wd##*/}"
+                          [ -r "$wd/identity" ] && cat "$wd/identity"
+                      done
+                  } > /dev/console 2>/dev/null
+                  sleep 1
+              done
+          ) &
+          echo 'AP305-TRACE starting preinit main hooks' > /dev/console
+          '''
+          file.write_text(source.replace(anchor, instrumentation + anchor))
+          PY
+          grep -q 'AP305-TRACE' package/base-files/files/etc/preinit
+
+      - name: Configure OpenWrt AP-305
+        working-directory: openwrt
+        run: |
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+          cat > .config <<'CONFIG'
+          CONFIG_TARGET_ipq40xx=y
+          CONFIG_TARGET_ipq40xx_generic=y
+          CONFIG_TARGET_ipq40xx_generic_DEVICE_aruba_ap-305=y
+          CONFIG_PACKAGE_luci=y
+          CONFIG_KERNEL_DEBUG_KERNEL=y
+          CONFIG_KERNEL_PRINTK_TIME=y
+          CONFIG
+          make defconfig
+          grep -q '^CONFIG_TARGET_ipq40xx_generic_DEVICE_aruba_ap-305=y$' .config
+
+      - name: Build trace image and verify contents
+        working-directory: openwrt
+        run: |
+          make -j2 V=s
+          test -n "$(find bin/targets/ipq40xx/generic -maxdepth 1 -type f -name '*aruba_ap-305-squashfs-sysupgrade.bin' -print -quit)"
+          sha256sum bin/targets/ipq40xx/generic/*aruba_ap-305* > ../ap305-trace-sha256sums.txt
+          cp package/base-files/files/etc/preinit ../ap305-instrumented-preinit.txt
+
+      - name: Upload diagnostic firmware and build records
+        uses: actions/upload-artifact@v4
+        with:
+          name: aruba-ap305-procd-trace-NAND
+          path: |
+            openwrt/bin/targets/ipq40xx/generic/*aruba_ap-305-initramfs-uImage.itb
+            openwrt/bin/targets/ipq40xx/generic/*aruba_ap-305-squashfs-sysupgrade.bin
+            openwrt/bin/targets/ipq40xx/generic/sha256sums
+            openwrt-commit.txt
+            ap305-commit.txt
+            ap305-trace-sha256sums.txt
+            ap305-instrumented-preinit.txt
