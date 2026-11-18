@@ -21,8 +21,39 @@ jobs:
           git clone --depth 1 --branch v24.10.7 https://github.com/openwrt/openwrt.git openwrt
           git clone --depth 1 https://github.com/Fr4ctbyte/OpenWRT-Aruba305.git ap305
           cd openwrt
-          git apply --check ../ap305/patches/upstream/0001-aruba-ap-305-support.patch
-          git apply ../ap305/patches/upstream/0001-aruba-ap-305-support.patch
+          # The upstream patch has stale context on 24.10.7. Add its three
+          # small registrations directly, asserting each expected anchor.
+          cp ../ap305/patches/upstream/qcom-ipq4029-ap-305.dts target/linux/ipq40xx/files-6.6/arch/arm/boot/dts/qcom/
+          python3 - <<'PY'
+          from pathlib import Path
+          network = Path('target/linux/ipq40xx/base-files/etc/board.d/02_network')
+          text = network.read_text()
+          anchor = 'aruba,ap-303|\\\n'
+          assert text.count(anchor) == 1, 'AP-303 network registration changed'
+          network.write_text(text.replace(anchor, anchor + '\taruba,ap-305|\\\n'))
+
+          upgrade = Path('target/linux/ipq40xx/base-files/lib/upgrade/platform.sh')
+          text = upgrade.read_text()
+          anchor = 'aruba,ap-303h |\\\n'
+          assert text.count(anchor) == 1, 'AP-303H upgrade registration changed'
+          upgrade.write_text(text.replace(anchor, anchor + '\taruba,ap-305 |\\\n'))
+
+          generic = Path('target/linux/ipq40xx/image/generic.mk')
+          text = generic.read_text()
+          assert 'define Device/aruba_glenmorangie' in text
+          assert 'define Device/aruba_ap-305' not in text
+          generic.write_text(text + '''
+
+          define Device/aruba_ap-305
+          \t$(call Device/aruba_glenmorangie)
+          \tDEVICE_MODEL := AP-305
+          \tDEVICE_PACKAGES := kmod-hwmon-ad7418 ath10k-firmware-qca99x0-ct
+          \tDEVICE_DTS_CONFIG := Glenmorangie@1
+          endef
+          TARGET_DEVICES += aruba_ap-305
+          ''')
+          PY
+          test -f target/linux/ipq40xx/files-6.6/arch/arm/boot/dts/qcom/qcom-ipq4029-ap-305.dts
           git rev-parse HEAD > ../openwrt-commit.txt
           git -C ../ap305 rev-parse HEAD > ../ap305-commit.txt
 
@@ -66,4 +97,3 @@ jobs:
             diagnostic-initramfs.sha256
             openwrt-commit.txt
             ap305-commit.txt
-
