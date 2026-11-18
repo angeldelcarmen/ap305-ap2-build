@@ -1,4 +1,4 @@
-name: Build Aruba AP-305 diagnostic RAM image
+name: Build Aruba AP-305 watchdog audit RAM image
 
 on:
   workflow_dispatch:
@@ -54,6 +54,18 @@ jobs:
           ''')
           PY
           test -f target/linux/ipq40xx/files-6.6/arch/arm/boot/dts/qcom/qcom-ipq4029-ap-305.dts
+          # Fail loudly if the upstream device tree silently changes the
+          # watchdog wiring. GPIO 3 is a hypothesis, NOT yet proven on this AP.
+          python3 - <<'PY'
+          from pathlib import Path
+          dts = Path('target/linux/ipq40xx/files-6.6/arch/arm/boot/dts/qcom/qcom-ipq4029-ap-305.dts').read_text()
+          cfg = Path('target/linux/ipq40xx/config-6.6').read_text()
+          for line in ('compatible = "linux,wdt-gpio";', 'gpios = <&tlmm 3 GPIO_ACTIVE_LOW>;', 'hw_algo = "toggle";', 'always-running;'):
+              assert line in dts, f'Missing DTS watchdog setting: {line}'
+          for line in ('CONFIG_WATCHDOG=y', 'CONFIG_GPIO_WATCHDOG=y', 'CONFIG_GPIO_WATCHDOG_ARCH_INITCALL=y'):
+              assert line in cfg or (line == 'CONFIG_WATCHDOG=y' and line in Path('target/linux/generic/config-6.6').read_text()), f'Missing kernel watchdog option: {line}'
+          PY
+          cp target/linux/ipq40xx/files-6.6/arch/arm/boot/dts/qcom/qcom-ipq4029-ap-305.dts ../ap305-watchdog-device-tree.dts
           git rev-parse HEAD > ../openwrt-commit.txt
           git -C ../ap305 rev-parse HEAD > ../ap305-commit.txt
 
@@ -71,12 +83,17 @@ jobs:
           CONFIG_KERNEL_DEBUG_FS=y
           CONFIG_KERNEL_PRINTK_TIME=y
           CONFIG_KERNEL_MAGIC_SYSRQ=y
-          CONFIG_KERNEL_WATCHDOG=y
-          CONFIG_KERNEL_GPIO_WATCHDOG=y
           CONFIG
           make defconfig
           grep -q '^CONFIG_TARGET_ipq40xx_generic_DEVICE_aruba_ap-305=y$' .config
           grep -E '^(CONFIG_KERNEL_(DEBUG_KERNEL|DEBUG_FS|PRINTK_TIME|MAGIC_SYSRQ|GPIO_WATCHDOG))=' .config || true
+
+      - name: Record and verify watchdog kernel configuration
+        working-directory: openwrt
+        run: |
+          # Kernel sources and the final kernel .config are prepared during the
+          # regular build; the next step verifies the *actual* configuration.
+          grep -E '^CONFIG_(GPIO_WATCHDOG|GPIO_WATCHDOG_ARCH_INITCALL|QCOM_WDT|WATCHDOG)=' target/linux/ipq40xx/config-6.6 > ../ap305-watchdog-target-options.txt
 
       - name: Compile diagnostic initramfs and sysupgrade image
         working-directory: openwrt
@@ -85,6 +102,13 @@ jobs:
           test -n "$(find bin/targets/ipq40xx/generic -maxdepth 1 -type f -name '*aruba_ap-305-initramfs-uImage.itb' -print -quit)"
           sha256sum bin/targets/ipq40xx/generic/*aruba_ap-305-initramfs-uImage.itb > ../diagnostic-initramfs.sha256
           find bin/targets/ipq40xx/generic -maxdepth 1 -type f -name '*aruba_ap-305*' -print
+          KCFG=$(find build_dir/target-*/linux-ipq40xx_generic -path '*/linux-6.6.*/.config' -type f -print -quit)
+          test -n "$KCFG"
+          cp "$KCFG" ../ap305-built-kernel.config
+          grep -q '^CONFIG_GPIO_WATCHDOG=y$' "$KCFG"
+          grep -q '^CONFIG_GPIO_WATCHDOG_ARCH_INITCALL=y$' "$KCFG"
+          grep -q '^CONFIG_QCOM_WDT=y$' "$KCFG"
+          grep -E '^CONFIG_(GPIO_WATCHDOG|GPIO_WATCHDOG_ARCH_INITCALL|QCOM_WDT|WATCHDOG)=' "$KCFG"
 
       - name: Upload images and reproducibility records
         uses: actions/upload-artifact@v4
@@ -97,3 +121,7 @@ jobs:
             diagnostic-initramfs.sha256
             openwrt-commit.txt
             ap305-commit.txt
+            ap305-watchdog-device-tree.dts
+            ap305-watchdog-target-options.txt
+            ap305-built-kernel.config
+
